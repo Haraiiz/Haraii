@@ -1,6 +1,6 @@
 import logging
 import sys
-import os # Import modul os untuk mengakses environment variables
+import os # Import modul os, meskipun sebagian besar Railway-specific logic dihapus, tetap ada untuk kompatibilitas jika diperlukan di masa depan.
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Chat
 from telegram.ext import (
     Application,
@@ -24,15 +24,21 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- KONFIGURASI ---
-BOT_TOKEN = "7609434892:AAGhKB2V22NRsECiXel0xoJyZFc9BKgZDd4" # Token bot kamu
-REQUIRED_CHANNEL_ID = -1002634779221 # ID channel wajib untuk verifikasi pengguna di chat pribadi
-REQUIRED_CHANNEL_LINK = "https://t.me/Privateyyds" # Link channel wajib
+# Mengambil BOT_TOKEN dari environment variable di Railway
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    logger.critical("FATAL ERROR: BOT_TOKEN tidak ditemukan di environment variables.")
+    sys.exit("BOT_TOKEN tidak diatur!") 
 
-# URL Gambar dari Imgur
+# ID dan link channel wajib untuk verifikasi pengguna di chat pribadi bot
+REQUIRED_CHANNEL_ID = -1002634779221
+REQUIRED_CHANNEL_LINK = "https://t.me/Privateyyds"
+
+# URL Gambar dari Imgur untuk tampilan bot yang lebih menarik
 IMAGE_URL_VERIFICATION = "https://i.imgur.com/JS49Nau.jpeg" # Gambar untuk menu verifikasi/selamat datang
-IMAGE_URL_MAIN_MENU = "https://i.imgur.com/T1r2fbC.jpeg" # Gambar untuk menu utama pribadi (juga bisa dipakai untuk grup jika ingin)
+IMAGE_URL_MAIN_MENU = "https://i.imgur.com/T1r2fbC.jpeg" # Gambar untuk menu utama pribadi & grup
 
-# States for ConversationHandler (only for private chat's channel management)
+# States untuk ConversationHandler dalam alur pengaturan channel pribadi
 GET_CHANNEL_ID = range(1)
 
 # --- FUNGSI PEMERIKSAAN IZIN (UNIVERSAL UNTUK CHAT/GROUP) ---
@@ -43,17 +49,24 @@ async def check_bot_ban_permissions(context: ContextTypes.DEFAULT_TYPE, chat_id:
     Mengembalikan (True, "Success") jika valid, atau (False, "Pesan Error") jika tidak.
     """
     try:
+        # Mendapatkan objek member bot di chat_id yang diberikan
         bot_member = await context.bot.get_chat_member(chat_id=chat_id, user_id=context.bot.id)
+        
+        # Memeriksa apakah status bot adalah administrator
         if bot_member.status != "administrator":
             return False, "Bot bukan admin di chat tersebut. Mohon jadikan bot admin terlebih dahulu."
+        
+        # Memeriksa apakah bot memiliki izin untuk 'Ban Users'
         if not bot_member.can_restrict_members:
             return False, "Bot adalah admin, tetapi tidak memiliki izin untuk 'Ban Users'. Mohon berikan izin tersebut."
+        
         return True, "Bot adalah admin dengan izin yang benar."
     except (BadRequest, Forbidden) as e:
         logger.error(f"Error checking permissions for chat {chat_id}: {e}")
+        # Menangani error spesifik jika bot tidak ditemukan di chat atau chat tidak ditemukan
         if "user not found" in str(e) or "chat not found" in str(e):
              return False, "Bot tidak ditemukan di chat tersebut. Mohon tambahkan bot terlebih dahulu."
-        return False, f"Terjadi kesalahan: Bot tidak ditemukan di chat atau chat tidak ditemukan." # Pesan error yang lebih jelas
+        return False, f"Terjadi kesalahan: {e}" # Mengembalikan pesan error yang lebih umum jika terjadi masalah lain
     except Exception as e:
         logger.error(f"Unexpected error checking permissions for chat {chat_id}: {e}")
         return False, "Terjadi kesalahan tak terduga saat memeriksa izin."
@@ -63,16 +76,16 @@ async def send_or_edit_photo_message(update: Update, context: ContextTypes.DEFAU
     """
     Mengirim pesan foto baru atau mengedit caption dari pesan foto yang sudah ada.
     - is_new_message: True jika ini adalah pesan baru (misal dari /start atau setelah delete pesan lama).
-    - caption_text: Teks singkat untuk caption foto.
+    - caption_text: Teks singkat untuk caption foto, karena Telegram punya batasan panjang caption.
     """
-    # Menentukan chat_id target
     target_chat_id = update.effective_chat.id
 
     if is_new_message:
+        # Mengirim pesan foto baru
         sent_message = await context.bot.send_photo(
             chat_id=target_chat_id,
             photo=photo_url,
-            caption=caption_text, # Gunakan caption_text singkat di sini
+            caption=caption_text, # Caption singkat di sini
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
@@ -81,16 +94,16 @@ async def send_or_edit_photo_message(update: Update, context: ContextTypes.DEFAU
         query = update.callback_query
         try:
             # Mengedit caption dari pesan yang memicu callback query
-            # Metode edit_caption() dari query.message tidak memerlukan chat_id atau message_id
+            # Metode edit_caption() dari query.message tidak memerlukan chat_id atau message_id eksplisit
             await query.message.edit_caption(
-                caption=caption_text, # Gunakan caption_text singkat di sini
+                caption=caption_text, # Caption singkat di sini
                 reply_markup=reply_markup,
                 parse_mode='Markdown'
             )
-            return query.message.message_id
+            return query.message.message_id # Mengembalikan ID pesan yang baru saja diedit
         except BadRequest as e:
             logger.warning(f"Gagal mengedit caption pesan via callback di chat {target_chat_id}: {e}. Mengirim pesan baru sebagai fallback.")
-            # Fallback: jika gagal edit, kirim pesan baru dan update message_id
+            # Fallback: jika gagal edit (misal karena caption terlalu panjang di update sebelumnya atau pesan sudah tidak ada), kirim pesan baru
             sent_message = await context.bot.send_photo(
                 chat_id=target_chat_id,
                 photo=photo_url,
@@ -100,7 +113,7 @@ async def send_or_edit_photo_message(update: Update, context: ContextTypes.DEFAU
             )
             return sent_message.message_id
     else:
-        # Ini adalah fallback jika bukan pesan baru dan bukan dari callback query.
+        # Ini adalah kasus fallback jika bukan pesan baru dan bukan dari callback query.
         # Biasanya terjadi jika ada interaksi langsung atau pesan bot yang tidak dilacak ID-nya.
         # Paling aman adalah mengirim pesan baru.
         sent_message = await context.bot.send_photo(
@@ -115,13 +128,16 @@ async def send_or_edit_photo_message(update: Update, context: ContextTypes.DEFAU
 # --- MENU UTAMA & NAVIGASI (UNTUK CHAT PRIBADI) ---
 
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, message_text="", is_initial_load=False):
-    """Menampilkan menu utama dengan tombol interaktif untuk pengaturan channel pribadi."""
+    """
+    Menampilkan menu utama dengan tombol interaktif untuk pengaturan channel pribadi pengguna.
+    Menggunakan pesan foto dengan caption singkat dan tombol.
+    """
     user_data = context.user_data
     banning_status = user_data.get('banning_enabled', False)
     toggle_text = "🔴 Matikan Ban (Channel)" if banning_status else "🟢 Aktifkan Ban (Channel)"
     monitored_channel = user_data.get('monitored_channel_title', 'Belum Diatur')
 
-    # Caption singkat untuk foto
+    # Caption singkat untuk foto menu utama
     caption = (
         f"🏠 **Menu Utama (Pengelolaan Channel Pribadi)**\n\n"
         f"▪️ **Channel Target**: `{monitored_channel}`\n"
@@ -137,29 +153,34 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, mes
 
     current_message_id = user_data.get('last_private_menu_message_id')
 
+    # Logika untuk mengirim pesan foto baru atau mengedit yang sudah ada
     if is_initial_load or (update.message and not update.callback_query):
+        # Jika ini adalah load awal atau dari command /start atau /cancel,
+        # hapus pesan lama (jika ada) dan kirim pesan foto baru.
         if current_message_id:
             try:
                 await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=current_message_id)
             except Exception as e:
                 logger.warning(f"Gagal menghapus pesan lama (ID: {current_message_id}) di chat pribadi: {e}")
         new_message_id = await send_or_edit_photo_message(
-            update, context, IMAGE_URL_MAIN_MENU, caption, reply_markup, # Gunakan caption singkat
+            update, context, IMAGE_URL_MAIN_MENU, caption, reply_markup,
             is_new_message=True
         )
     elif update.callback_query:
+        # Jika dari callback query (misal klik tombol), edit pesan yang sama.
         await update.callback_query.answer()
         new_message_id = await send_or_edit_photo_message(
-            update, context, IMAGE_URL_MAIN_MENU, caption, reply_markup, # Gunakan caption singkat
+            update, context, IMAGE_URL_MAIN_MENU, caption, reply_markup,
             is_new_message=False
         )
-    else: # Fallback
+    else: # Fallback case, seharusnya jarang terjadi jika alur logikanya benar
         new_message_id = await send_or_edit_photo_message(
             update, context, IMAGE_URL_MAIN_MENU, caption, reply_markup,
             is_new_message=True
         )
-        logger.warning(f"show_main_menu: Unhandled update type. Sent new message.")
+        logger.warning(f"show_main_menu: Tipe update tidak ditangani. Mengirim pesan baru.")
 
+    # Simpan message_id dari pesan menu yang baru dikirim/diedit
     user_data['last_private_menu_message_id'] = new_message_id
 
 async def back_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -169,14 +190,17 @@ async def back_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- MENU & NAVIGASI (UNTUK GRUP) ---
 
 async def show_group_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, message_text=""):
-    """Menampilkan menu untuk pengaturan bot di dalam grup."""
+    """
+    Menampilkan menu untuk pengaturan bot di dalam grup.
+    Menggunakan pesan foto dengan caption singkat dan tombol.
+    """
     chat_id = update.effective_chat.id
     group_data = context.chat_data # Mengakses data khusus untuk grup ini
 
     banning_status = group_data.get('banning_enabled', False)
     toggle_text = "🔴 Matikan Ban (Group)" if banning_status else "🟢 Aktifkan Ban (Group)"
 
-    # Caption singkat untuk foto di grup
+    # Caption singkat untuk foto menu grup
     caption = (
         f"🏠 **Menu Bot (Group)**\n\n"
         f"Selamat datang di group `{update.effective_chat.title}`!\n"
@@ -198,13 +222,13 @@ async def show_group_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, me
             except Exception as e:
                 logger.warning(f"Gagal menghapus pesan lama group (ID: {current_message_id}): {e}")
         new_message_id = await send_or_edit_photo_message(
-            update, context, IMAGE_URL_MAIN_MENU, caption, reply_markup, # Gunakan gambar menu utama untuk grup
+            update, context, IMAGE_URL_MAIN_MENU, caption, reply_markup,
             is_new_message=True
         )
     elif update.callback_query:
         await update.callback_query.answer()
         new_message_id = await send_or_edit_photo_message(
-            update, context, IMAGE_URL_MAIN_MENU, caption, reply_markup, # Gunakan gambar menu utama untuk grup
+            update, context, IMAGE_URL_MAIN_MENU, caption, reply_markup,
             is_new_message=False
         )
     else: # Fallback
@@ -212,7 +236,7 @@ async def show_group_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, me
             update, context, IMAGE_URL_MAIN_MENU, caption, reply_markup,
             is_new_message=True
         )
-        logger.warning(f"show_group_menu: Unhandled update type. Sent new message.")
+        logger.warning(f"show_group_menu: Tipe update tidak ditangani. Mengirim pesan baru.")
 
     group_data['last_group_menu_message_id'] = new_message_id
 
@@ -242,7 +266,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             member = await context.bot.get_chat_member(chat_id=REQUIRED_CHANNEL_ID, user_id=user_id)
             if member.status in ['member', 'administrator', 'creator']:
                 context.user_data['is_verified'] = True
-                await show_main_menu(update, context, is_initial_load=True) # Ini akan mengirim pesan foto baru
+                await show_main_menu(update, context, is_initial_load=True) # Mengirim pesan foto menu utama
             else:
                 raise ValueError("User not in channel")
         except Exception:
@@ -250,7 +274,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard = [[InlineKeyboardButton("✅ Saya Sudah Bergabung", callback_data="verify_join")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
-            caption = f"**Selamat Datang!**\n\nUntuk mengaktifkan fitur, **wajib** gabung channel kami dulu ya. Klik tombol!" # Caption singkat
+            # Caption singkat untuk foto verifikasi
+            caption = f"**Selamat Datang!**\n\nUntuk mengaktifkan fitur, **wajib** gabung channel kami dulu ya. Klik tombol!"
             
             new_message_id = await send_or_edit_photo_message(
                 update, context, IMAGE_URL_VERIFICATION,
@@ -264,7 +289,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=update.effective_chat.id,
                 text=f"➡️ **Join di sini**: {REQUIRED_CHANNEL_LINK}\n\nSetelah bergabung, klik tombol di atas untuk verifikasi.",
                 parse_mode='Markdown',
-                disable_web_page_preview=True
+                disable_web_page_preview=True # Untuk menghindari preview link jika tidak diinginkan
             )
 
     elif chat_type in [Chat.GROUP, Chat.SUPERGROUP]:
@@ -287,7 +312,7 @@ async def verify_join_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         if member.status in ['member', 'administrator', 'creator']:
             context.user_data['is_verified'] = True
             await query.answer("✅ Verifikasi berhasil!", show_alert=True)
-            # Hapus pesan verifikasi lama, kirim pesan menu utama baru
+            # Hapus pesan verifikasi lama (termasuk foto) dan kirim pesan menu utama baru
             if current_message_id:
                 try:
                     await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=current_message_id)
@@ -309,12 +334,12 @@ async def start_set_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     # Caption singkat untuk prompt input channel
     caption = "✍️ **Kirimkan Username atau ID Channel Anda**\n\nPastikan bot ini sudah jadi **Admin** dengan izin **'Ban Users'** ya!"
 
-    # Ini akan mengedit caption dari pesan foto menu utama yang ada
+    # Edit pesan foto menu utama yang ada dengan caption prompt
     await send_or_edit_photo_message(
         update, context, IMAGE_URL_MAIN_MENU, caption, InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Batalkan", callback_data="back_to_main")]]),
         is_new_message=False
     )
-    return GET_CHANNEL_ID # FIX: Ini harus GET_CHANNEL_ID agar ConversationHandler menunggu input
+    return GET_CHANNEL_ID # Mengembalikan GET_CHANNEL_ID agar ConversationHandler menunggu input
 
 async def get_channel_id_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Menerima, memvalidasi channel, dan memeriksa izin bot (untuk chat pribadi)."""
@@ -325,7 +350,7 @@ async def get_channel_id_input(update: Update, context: ContextTypes.DEFAULT_TYP
         except Exception as e:
             logger.warning(f"Gagal menghapus pesan input channel: {e}")
 
-    feedback_text = "" # Inisialisasi feedback_text
+    feedback_text = "" # Inisialisasi feedback_text untuk pesan teks terpisah
     
     try:
         chat = await context.bot.get_chat(chat_id=channel_input)
@@ -347,7 +372,7 @@ async def get_channel_id_input(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.effective_chat.send_message(text=feedback_text, parse_mode='Markdown')
 
     # Kembali ke main menu, yang akan memperbarui tampilan menu utama
-    await show_main_menu(update, context, is_initial_load=True) # Panggilan ini akan mengatur kembali ke tampilan menu utama
+    await show_main_menu(update, context, is_initial_load=True) # Mengirim pesan foto menu utama yang baru
     return ConversationHandler.END
 
 async def toggle_channel_ban_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -364,7 +389,7 @@ async def toggle_channel_ban_callback(update: Update, context: ContextTypes.DEFA
         if not is_valid:
             context.user_data['banning_enabled'] = False
             await query.answer(f"Gagal Mengaktifkan: {message}", show_alert=True)
-            await show_main_menu(update, context)
+            await show_main_menu(update, context) # Kembali ke menu utama dengan status terbaru
             return
 
     current_state = context.user_data.get('banning_enabled', False)
@@ -391,7 +416,7 @@ async def how_to_use_channel_callback(update: Update, context: ContextTypes.DEFA
         is_new_message=False
     )
 
-    # Kirim detail panduan sebagai pesan teks terpisah
+    # Kirim detail panduan sebagai pesan teks terpisah (boleh panjang)
     detailed_text = (
         "Halo, bestie! Bot ini tuh fungsinya simpel tapi nampol: **nge-ban otomatis** member yang *left* dari channel Telegram kesayangan kamu. Biar channel kamu isinya member loyal semua!\n\n"
         "--- \n\n"
@@ -427,7 +452,7 @@ async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE
     """Membatalkan aksi saat ini dan kembali ke menu utama (untuk chat pribadi)."""
     if update.message:
         try:
-            await update.message.delete()
+            await update.message.delete() # Hapus pesan /cancel yang dikirim pengguna
         except Exception as e:
             logger.warning(f"Gagal menghapus pesan /cancel: {e}")
 
@@ -479,12 +504,13 @@ async def how_to_use_group_callback(update: Update, context: ContextTypes.DEFAUL
     keyboard = [[InlineKeyboardButton("⬅️ Balik ke Menu Group", callback_data="back_to_group_menu")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
+    # Edit pesan gambar yang ada dengan caption singkat dan tombol
     await send_or_edit_photo_message(
         update, context, IMAGE_URL_MAIN_MENU, caption, reply_markup,
         is_new_message=False
     )
 
-    # Kirim detail panduan sebagai pesan teks terpisah
+    # Kirim detail panduan sebagai pesan teks terpisah (boleh panjang)
     detailed_text = (
         "Woy bestie! Bot ini tuh auto-ban member yang kabur dari grup kamu. Jadi, grup kamu bakal aman dari *silent left* yang bikin gabut.\n\n"
         "--- \n\n"
@@ -511,122 +537,120 @@ async def how_to_use_group_callback(update: Update, context: ContextTypes.DEFAUL
     await update.effective_chat.send_message(text=detailed_text, parse_mode='Markdown', disable_web_page_preview=True)
 
 
-# --- FUNGSI UTAMA UNTUK MEMPROSES UPDATE ANGGOTA ---
+# --- FUNGSI UTAMA UNTUK MEMPROSES UPDATE ANGGOTA (DETEKSI USER KELUAR) ---
 
 async def handle_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Memproses update status anggota dan melakukan ban jika sesuai, baik untuk channel maupun group."""
-    if not update.chat_member: return
+    """
+    Memproses update status anggota dan melakukan ban jika sesuai, baik untuk channel maupun group.
+    Fungsi ini akan mendeteksi ketika seorang pengguna meninggalkan chat (channel atau group)
+    dan mencoba memblokirnya jika fitur banning aktif.
+    """
+    if not update.chat_member: # Pastikan ini adalah update chat_member
+        return
+    
     leaving_user = update.chat_member.new_chat_member.user
-    chat_id_of_event = update.chat_member.chat.id # Ini bisa ID Channel atau ID Group
-    chat_title_of_event = update.chat_member.chat.title
+    chat_id_of_event = update.chat_member.chat.id # ID chat tempat event terjadi (bisa Channel atau Group)
+    chat_title_of_event = update.chat_member.chat.title # Nama chat tempat event terjadi
 
-    # Hanya proses jika pengguna sebelumnya adalah anggota/terbatas dan sekarang "left"
+    # Hanya proses jika status lama adalah 'member' atau 'restricted' dan status baru adalah 'left'
     if not (update.chat_member.old_chat_member.status in ["member", "restricted"] and
-            update.chat_member.new_chat_member.status == "left"): return
+            update.chat_member.new_chat_member.status == "left"):
+        return # Abaikan jika bukan event meninggalkan chat
 
-    banned_successfully = False
+    banned_successfully = False # Flag untuk menghindari double-banning/notifikasi
 
-    # 1. Periksa apakah event ini berkaitan dengan CHANNEL yang dimonitor oleh pengguna (melalui pengaturan chat pribadi)
-    # Iterasi melalui semua data pengguna untuk mencari apakah ada pengguna yang memonitor channel ini
+    # 1. Cek apakah event ini terjadi di CHANNEL yang dimonitor oleh salah satu pengguna bot
+    # Iterasi melalui semua data pengguna yang disimpan oleh bot
     for user_id_owner, user_data_owner in context.application.user_data.items():
+        # Jika channel yang dimonitor pengguna cocok dengan chat_id_of_event DAN fitur banning aktif untuk channel tersebut
         if user_data_owner.get('monitored_channel_id') == chat_id_of_event and user_data_owner.get('banning_enabled', False):
             try:
+                # Coba ban pengguna dari channel
                 await context.bot.ban_chat_member(chat_id=chat_id_of_event, user_id=leaving_user.id)
                 logger.info(f"Berhasil memblokir {leaving_user.full_name} dari channel {chat_id_of_event} milik user {user_id_owner} (via pengaturan pribadi)")
+                
+                # Kirim notifikasi sukses ke chat pribadi pemilik bot
                 await context.bot.send_message(
-                    chat_id=user_id_owner, # Kirim notifikasi ke chat pribadi pemilik bot
+                    chat_id=user_id_owner,
                     text=f"✅ **Notifikasi Blokir (Channel)**\n\nPengguna berikut telah keluar dari channel **{chat_title_of_event}** dan berhasil diblokir:\n\n▪️ **Nama**: {leaving_user.full_name}\n▪️ **Username**: @{leaving_user.username or 'Tidak ada'}\n▪️ **ID**: `{leaving_user.id}`",
                     parse_mode='Markdown'
                 )
                 banned_successfully = True
-                break # Channel biasanya hanya diatur oleh satu pengguna, jadi bisa berhenti setelah ditemukan
+                break # Setelah menemukan channel yang cocok dan berhasil di-ban, berhenti iterasi
             except Exception as e:
                 logger.error(f"Gagal memblokir {leaving_user.id} di channel {chat_id_of_event} (pengaturan pribadi): {e}")
+                # Kirim notifikasi gagal ke chat pribadi pemilik bot
                 await context.bot.send_message(
                     chat_id=user_id_owner,
                     text=f"❌ **Gagal Memblokir (Channel)**\n\nGagal memblokir {leaving_user.full_name} di channel **{chat_title_of_event}**.\n**Error**: `{e}`\n\nPastikan bot masih menjadi admin dengan izin ban."
                 )
 
-    # 2. Periksa apakah event ini berkaitan dengan GROUP yang diaktifkan bot (melalui pengaturan group)
-    # context.application.chat_data adalah dictionary yang menyimpan data untuk setiap chat (group)
+    # 2. Cek apakah event ini terjadi di GROUP tempat bot diaktifkan
+    # context.application.chat_data menyimpan data untuk setiap chat (group)
     group_specific_data = context.application.chat_data.get(chat_id_of_event)
     if group_specific_data and group_specific_data.get('banning_enabled', False):
-        if not banned_successfully: # Hindari double-banning/notifikasi jika sudah ditangani oleh logika channel
+        if not banned_successfully: # Hanya proses jika belum di-ban oleh logika channel
             try:
+                # Coba ban pengguna dari grup
                 await context.bot.ban_chat_member(chat_id=chat_id_of_event, user_id=leaving_user.id)
                 logger.info(f"Berhasil memblokir {leaving_user.full_name} dari group {chat_id_of_event} (via pengaturan group)")
+                
+                # Kirim notifikasi sukses ke grup itu sendiri
                 await context.bot.send_message(
-                    chat_id=chat_id_of_event, # Kirim notifikasi ke group itu sendiri
+                    chat_id=chat_id_of_event,
                     text=f"✅ **Notifikasi Blokir (Group)**\n\nPengguna berikut telah keluar dari group ini dan berhasil diblokir:\n\n▪️ **Nama**: {leaving_user.full_name}\n▪️ **Username**: @{leaving_user.username or 'Tidak ada'}\n▪️ **ID**: `{leaving_user.id}`",
                     parse_mode='Markdown'
                 )
             except Exception as e:
                 logger.error(f"Gagal memblokir {leaving_user.id} di group {chat_id_of_event} (pengaturan group): {e}")
+                # Kirim notifikasi gagal ke grup itu sendiri
                 await context.bot.send_message(
-                    chat_id=chat_id_of_event, # Kirim notifikasi error ke group itu sendiri
+                    chat_id=chat_id_of_event,
                     text=f"❌ **Gagal Memblokir (Group)**\n\nGagal memblokir {leaving_user.full_name} di group ini.\n**Error**: `{e}`\n\nPastikan bot masih menjadi admin dengan izin ban."
                 )
 
 def main() -> None:
     """Menjalankan Bot."""
+    # PicklePersistence akan otomatis menangani penyimpanan data untuk user_data dan chat_data
     persistence = PicklePersistence(filepath="my_bot_data.pkl")
     application = Application.builder().token(BOT_TOKEN).persistence(persistence).build()
 
+    # --- DAFTAR HANDLER BOT ---
     # Handler untuk Command /start (universal untuk chat pribadi dan grup)
     application.add_handler(CommandHandler("start", start))
 
     # Handler untuk verifikasi bergabung channel wajib (hanya untuk chat pribadi)
     application.add_handler(CallbackQueryHandler(verify_join_callback, pattern='^verify_join$'))
 
-    # ConversationHandler untuk pengaturan channel target (hanya untuk chat pribadi)
+    # ConversationHandler untuk alur pengaturan channel target (hanya untuk chat pribadi)
     conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(start_set_channel, pattern='^set_channel$')],
         states={
             GET_CHANNEL_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_channel_id_input)],
         },
         fallbacks=[CommandHandler("cancel", cancel_conversation)],
-        per_user=True, # Percakapan unik per pengguna
+        per_user=True,
         map_to_parent={ ConversationHandler.END: ConversationHandler.END, }
     )
     application.add_handler(conv_handler)
 
-    # Handler untuk toggle fitur ban channel dan cara pakai (hanya untuk chat pribadi)
+    # Handler untuk toggle fitur ban channel pribadi dan panduan cara pakai
     application.add_handler(CallbackQueryHandler(toggle_channel_ban_callback, pattern='^toggle_channel_ban$'))
     application.add_handler(CallbackQueryHandler(how_to_use_channel_callback, pattern='^how_to_use_channel$'))
     application.add_handler(CallbackQueryHandler(back_to_main_menu, pattern='^back_to_main$'))
 
-    # Handler untuk toggle fitur ban group dan cara pakai (untuk dalam grup)
+    # Handler untuk toggle fitur ban group dan panduan cara pakai di grup
     application.add_handler(CallbackQueryHandler(toggle_group_ban_callback, pattern='^toggle_group_ban$'))
     application.add_handler(CallbackQueryHandler(how_to_use_group_callback, pattern='^how_to_use_group$'))
     application.add_handler(CallbackQueryHandler(back_to_group_menu, pattern='^back_to_group_menu$'))
 
-
-    # Handler universal untuk update status anggota (bekerja untuk channel dan group)
+    # Handler universal untuk update status anggota (mendeteksi user keluar dari channel/group)
     application.add_handler(ChatMemberHandler(handle_member_update, ChatMemberHandler.CHAT_MEMBER))
 
-    # --- Logika untuk Webhook atau Polling (otomatis deteksi Railway) ---
-    # Mendapatkan port yang dialokasikan Railway (default 8080 jika tidak ada)
-    PORT = int(os.environ.get('PORT', 8080))
-    # Mendapatkan URL publik dari Railway
-    PUBLIC_URL = os.environ.get('RAILWAY_APP_PUBLIC_DOMAIN', None) 
-    # Alternatif: os.environ.get('RAILWAY_URL', None) juga bisa dipakai
-
-    if PUBLIC_URL:
-        # Jika ada PUBLIC_URL, berarti kita di environment cloud (Railway) -> gunakan Webhook
-        WEBHOOK_PATH = BOT_TOKEN # Path unik untuk webhook
-        WEBHOOK_URL = f"https://{PUBLIC_URL}/{WEBHOOK_PATH}"
-
-        application.run_webhook(
-            listen="0.0.0.0", # Dengarkan di semua interface
-            port=PORT, # Port yang dialokasikan Railway
-            url_path=WEBHOOK_PATH, # Path untuk webhook
-            webhook_url=WEBHOOK_URL # URL lengkap yang didaftarkan ke Telegram
-        )
-        logger.info(f"Bot running via webhook at {WEBHOOK_URL} on port {PORT}")
-    else:
-        # Jika tidak ada PUBLIC_URL, berarti kita di lokal -> gunakan Polling
-        logger.info("Bot running locally via polling...")
-        application.run_polling()
+    # --- Jalankan Bot dalam Mode Polling ---
+    # Bot akan selalu berjalan dalam mode polling, cocok untuk lingkungan lokal seperti Termux.
+    logger.info("Bot running locally via polling...")
+    application.run_polling()
 
 if __name__ == "__main__":
     main()
